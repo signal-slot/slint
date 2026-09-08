@@ -7,17 +7,12 @@ import slint_testing
 from source_snapshot import SourceSnapshot
 from ui_driver import (
     elements_with_label,
+    file_row,
     first_window,
     launch_editor,
     wait_until,
     window_element_with_label,
 )
-
-
-def file_row(window: slint_testing.Window, path: Path) -> slint_testing.Element:
-    return window_element_with_label(
-        window, str(path), slint_testing.AccessibleRole.ListItem
-    )
 
 
 def test_file_tree_opens_sibling_component(

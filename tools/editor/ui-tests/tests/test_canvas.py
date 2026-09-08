@@ -24,6 +24,7 @@ from slint_testing import keys
 from source_snapshot import SourceSnapshot
 from ui_driver import (
     elements_with_label,
+    file_row,
     first_window,
     launch_editor,
     select_fixture_element,
@@ -652,13 +653,9 @@ def test_image_asset_mode_destroys_canvas_without_replaying_palette_drop(
         wait_for_source_change(source_file, baseline)
         snapshot = SourceSnapshot.capture(fixture_project)
 
-        asset_directory_row = window_element_with_label(
-            window, str(asset_directory), slint_testing.AccessibleRole.ListItem
-        )
+        asset_directory_row = file_row(window, asset_directory)
         asset_directory_row.single_click(slint_testing.PointerEventButton.Left)
-        image_row = window_element_with_label(
-            window, str(image_file), slint_testing.AccessibleRole.ListItem
-        )
+        image_row = file_row(window, image_file)
         image_row.single_click(slint_testing.PointerEventButton.Left)
         preview_tab = window_element_with_label(
             window, "Preview", slint_testing.AccessibleRole.Button
@@ -673,9 +670,7 @@ def test_image_asset_mode_destroys_canvas_without_replaying_palette_drop(
             .find_all()
         )
 
-        component_row = window_element_with_label(
-            window, str(source_file), slint_testing.AccessibleRole.ListItem
-        )
+        component_row = file_row(window, source_file)
         component_row.single_click(slint_testing.PointerEventButton.Left)
         window_element_with_label(
             window, "Artboard", slint_testing.AccessibleRole.Region
