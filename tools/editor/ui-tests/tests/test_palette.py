@@ -132,7 +132,6 @@ def test_palette_drop_outside_canvas_does_not_edit_source(
 
 
 @pytest.mark.parametrize("kind", PALETTE_KINDS)
-@pytest.mark.skip(reason="Requires Rust palette drop-marker support")
 def test_escape_cancels_palette_drag_without_source_edit(
     editor_binary: Path,
     editor_environment: dict[str, str],
@@ -146,11 +145,11 @@ def test_escape_cancels_palette_drag_without_source_edit(
         target = canvas_drop_position(window)
         begin_palette_drag(window, kind, target)
         window_element_with_label(
-            window, "Canvas drop marker", slint_testing.AccessibleRole.Region
+            window, f"{kind} drag preview", slint_testing.AccessibleRole.Region
         )
         press_key(window, keys.Escape)
         release_palette_drag(window, target)
-        assert not elements_with_label(window.root_element, "Canvas drop marker")
+        assert not elements_with_label(window.root_element, f"{kind} drag preview")
         snapshot.assert_unchanged()
 
 
