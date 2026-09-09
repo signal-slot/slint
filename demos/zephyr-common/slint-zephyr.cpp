@@ -13,64 +13,50 @@ LOG_MODULE_REGISTER(zephyrSlint, LOG_LEVEL_DBG);
 #include <zephyr/version.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/input/input.h>
-#include <zephyr/version.h>
-
-// Zephyr 4.4 renamed PIXEL_FORMAT_BGR_565 to PIXEL_FORMAT_RGB_565X. The EK-RZ/A3M board support
-// currently only exists on a 4.3 based fork, so this demo has to compile against both spellings.
-#if KERNEL_VERSION_NUMBER >= ZEPHYR_VERSION(4, 4, 0)
-#    define SLINT_PIXEL_FORMAT_RGB565_SWAPPED PIXEL_FORMAT_RGB_565X
-#    define SLINT_PIXEL_FORMAT_RGB565_SWAPPED_NAME "RGB_565X"
-#else
-#    define SLINT_PIXEL_FORMAT_RGB565_SWAPPED PIXEL_FORMAT_BGR_565
-#    define SLINT_PIXEL_FORMAT_RGB565_SWAPPED_NAME "BGR_565"
-#endif
 
 #include <chrono>
 #include <deque>
-#include <span>
 #include <ranges>
 
-// Set by boards whose driver declares one byte order and consumes the other, and by trees
-// older than Zephyr 4.4. See https://github.com/zephyrproject-rtos/zephyr/issues/53642
-#ifndef SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN
-#    define SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN 0
-#endif
-
-// The rotation, in degrees, that brings the panel's natural orientation in line with the
-// orientation the user interface is designed for. Panels that are mounted sideways define this in
-// their board's section of the demo's CMakeLists.txt, and the software renderer turns the user
-// interface while it draws.
-#ifndef SLINT_ZEPHYR_PANEL_ROTATION
-#    define SLINT_ZEPHYR_PANEL_ROTATION 0
+// Zephyr renamed this format upstream in commit b13d9a0510b ("display: rename
+// current BGR_565 format into RGB_565X"); PIXEL_FORMAT_BGR_565 no longer
+// exists from Zephyr v4.4.0 onwards.
+#if ZEPHYR_VERSION(4, 4, 0) > ZEPHYR_VERSION_CODE
+#    define SLINT_ZEPHYR_PIXEL_FORMAT_BGR_565 PIXEL_FORMAT_BGR_565
+#else
+#    define SLINT_ZEPHYR_PIXEL_FORMAT_BGR_565 PIXEL_FORMAT_RGB_565X
 #endif
 
 namespace {
-constexpr bool is_big_endian_format(display_pixel_format format)
-{
-#if KERNEL_VERSION_NUMBER >= ZEPHYR_VERSION(4, 4, 0)
-    return format == SLINT_PIXEL_FORMAT_RGB565_SWAPPED;
-#else
-    // display_sdl.c read RGB_565 with sys_be16_to_cpu() and BGR_565 natively until the rename.
-    return format == PIXEL_FORMAT_RGB_565;
-#endif
-}
-
-constexpr bool needs_byte_swap(display_pixel_format format)
-{
-    if (SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN) {
-        return false;
-    }
-    return is_big_endian_format(format) != static_cast<bool>(IS_ENABLED(CONFIG_BIG_ENDIAN));
-}
-
 bool is_supported_pixel_format(display_pixel_format current_pixel_format)
 {
     switch (current_pixel_format) {
     case PIXEL_FORMAT_RGB_565:
-    case SLINT_PIXEL_FORMAT_RGB565_SWAPPED:
         return true;
     case PIXEL_FORMAT_RGB_888:
         // Slint supports this format, but it uses more space.
+        return false;
+    case SLINT_ZEPHYR_PIXEL_FORMAT_BGR_565:
+#if defined(CONFIG_SHIELD_RK055HDMIPI4MA0) || defined(CONFIG_SHIELD_LCD_PAR_S035)
+        // Zephyr expects pixel data to be big endian [1].
+
+        // The display driver expects RGB 565 pixel data [2], and appears to expect it to be little
+        // endian.
+
+        // By passing Slint's little endian, RGB 565 pixel data without converting to big endian as
+        // Zephyr expects, we get colors that work.
+
+        // [1]
+        // https://docs.zephyrproject.org/latest/hardware/peripherals/display/index.html#c.display_pixel_format
+        // [2]
+        // https://github.com/zephyrproject-rtos/zephyr/blob/c211cb347e0af0a4931e0e7af3d93577bcc7af8f/drivers/display/display_mcux_elcdif.c#L256
+
+        // See also:
+        // https://github.com/zephyrproject-rtos/zephyr/issues/53642
+        return true;
+#else
+        return false;
+#endif
         return false;
     case PIXEL_FORMAT_MONO01:
     case PIXEL_FORMAT_MONO10:
@@ -87,92 +73,44 @@ struct k_unique_lock
     struct k_mutex *mutex = nullptr;
 };
 
-using RenderingRotation = slint::platform::SoftwareRenderer::RenderingRotation;
-
-constexpr int rotation_degrees(RenderingRotation rotation)
+struct RotationInfo
 {
-    return static_cast<int>(rotation);
-}
+    using RenderingRotation = slint::platform::SoftwareRenderer::RenderingRotation;
+    RenderingRotation rotation = RenderingRotation::NoRotation;
+    slint::PhysicalSize size;
 
-constexpr RenderingRotation rotation_from_degrees(int degrees)
-{
-    switch (((degrees % 360) + 360) % 360) {
-    case 90:
-        return RenderingRotation::Rotate90;
-    case 180:
-        return RenderingRotation::Rotate180;
-    case 270:
-        return RenderingRotation::Rotate270;
-    default:
-        return RenderingRotation::NoRotation;
-    }
-}
-
-constexpr bool transposes(RenderingRotation rotation)
-{
-    return rotation == RenderingRotation::Rotate90 || rotation == RenderingRotation::Rotate270;
-}
-
-constexpr slint::PhysicalSize transposed_if(slint::PhysicalSize size, bool condition)
-{
-    if (condition)
-        std::swap(size.width, size.height);
-    return size;
-}
-
-// Describes how the panel, the frame buffer and the user interface are oriented relative to each
-// other. Two rotations can be in play at once: the display hardware may turn the frame buffer on
-// its way to the panel, and the software renderer may turn the user interface while it draws.
-struct DisplayRotation
-{
-    // Resolution the display driver reports, in the panel's natural orientation.
-    slint::PhysicalSize panel_size;
-    // Rotation the software renderer applies while drawing into the frame buffer.
-    RenderingRotation rendering = RenderingRotation::NoRotation;
-    // Rotation the display hardware applies to the frame buffer on its way to the panel, for
-    // instance through the i.MX RT PXP. The renderer must not turn the interface again in that
-    // case, so this is kept apart from `rendering`.
-    RenderingRotation hardware = RenderingRotation::NoRotation;
-
-    // Geometry of the frame buffer handed to display_write(): the panel geometry, transposed when
-    // the hardware turns it by a quarter.
-    slint::PhysicalSize buffer_size() const
+    bool is_transpose() const
     {
-        return transposed_if(panel_size, transposes(hardware));
+        return rotation == RenderingRotation::Rotate90 || rotation == RenderingRotation::Rotate270;
     }
 
-    // Size the user interface is laid out in, which is what the user ends up seeing.
-    slint::PhysicalSize logical_size() const
+    bool mirror_width() const
     {
-        return transposed_if(buffer_size(), transposes(rendering));
+        return rotation == RenderingRotation::Rotate180 || rotation == RenderingRotation::Rotate270;
     }
 
-    // Rotation that maps a position reported by the touch controller, which is in panel
-    // coordinates, into logical coordinates. Turning the user interface by `rendering` carries a
-    // touch along by the same amount, whereas `hardware` has already been applied to the panel and
-    // has to be undone.
-    RenderingRotation touch_rotation() const
+    bool mirror_height() const
     {
-        return rotation_from_degrees(rotation_degrees(rendering) - rotation_degrees(hardware));
+        return rotation == RenderingRotation::Rotate90 || rotation == RenderingRotation::Rotate180;
     }
 };
 
-// Applies `rotation` to `position`, which lives in a coordinate system of `size`.
-slint::LogicalPosition rotated(slint::LogicalPosition position, RenderingRotation rotation,
-                               slint::PhysicalSize size)
+slint::LogicalPosition transformed(slint::LogicalPosition p, const RotationInfo &info)
 {
-    switch (rotation) {
-    case RenderingRotation::NoRotation:
-        break;
-    case RenderingRotation::Rotate90:
-        return slint::LogicalPosition({ position.y, size.width - position.x - 1 });
-    case RenderingRotation::Rotate180:
-        return slint::LogicalPosition(
-                { size.width - position.x - 1, size.height - position.y - 1 });
-    case RenderingRotation::Rotate270:
-        return slint::LogicalPosition({ size.height - position.y - 1, position.x });
-    }
-    return position;
+    if (info.mirror_width())
+        p.x = info.size.width - p.x - 1;
+    if (info.mirror_height())
+        p.y = info.size.height - p.y - 1;
+    if (info.is_transpose())
+        std::swap(p.x, p.y);
+    return p;
+}
+
+slint::PhysicalSize transformed(slint::PhysicalSize s, const RotationInfo &info)
+{
+    if (info.is_transpose())
+        std::swap(s.width, s.height);
+    return s;
 }
 }
 
@@ -243,7 +181,7 @@ public:
     static std::unique_ptr<ZephyrWindowAdapter> init_from(const device *display);
 
     explicit ZephyrWindowAdapter(const device *display, RepaintBufferType buffer_type,
-                                 const DisplayRotation &rotation, bool needs_byte_swap);
+                                 const RotationInfo &info);
 
     void request_redraw() override;
     slint::PhysicalSize size() override;
@@ -251,25 +189,48 @@ public:
 
     void maybe_redraw();
 
-    // Maps a position reported by the touch controller into logical coordinates.
-    slint::LogicalPosition map_touch_position(slint::LogicalPosition position) const;
+    const RotationInfo &rotationInfo() const;
 
 private:
     slint::platform::SoftwareRenderer m_renderer;
 
     const struct device *m_display;
-    const DisplayRotation m_rotation;
-    const slint::PhysicalSize m_buffer_size;
-    const bool m_needs_byte_swap;
+    const RotationInfo m_rotationInfo;
+    const slint::PhysicalSize m_size;
 
     bool m_needs_redraw = true;
+#ifdef CONFIG_SHIELD_LCD_PAR_S035
+    slint::platform::Rgb565Pixel *m_buffer;
+#else
     std::vector<slint::platform::Rgb565Pixel> m_buffer;
+#endif
     display_buffer_descriptor m_buffer_descriptor;
 };
 
 static ZephyrWindowAdapter *ZEPHYR_WINDOW = nullptr;
 
+// LCD-PAR-S035 shield: fixed 480x320 display resolution, BGR565 pixel format.
+// render_by_line's callback is invoked once per physical line (see
+// slint-platform.h), and maybe_redraw below always fills the buffer from
+// offset 0 and flushes it with display_write before the next line is
+// rendered, so only one line's worth of pixels is ever live at a time. The
+// buffer is a static BSS array (not heap-allocated) to avoid heap allocation
+// on this RAM-constrained board (320 KB total SRAM).
+//
+// With SLINT_ZEPHYR_RENDER_BUFFER_SRAMX defined, the buffer is placed in the
+// otherwise-unused SRAMX region instead of the main SRAM. SRAMX must be
+// reachable by the display write path for this to work, so it is an opt-in
+// toggle.
 #ifdef CONFIG_SHIELD_LCD_PAR_S035
+#    ifdef SLINT_ZEPHYR_RENDER_BUFFER_SRAMX
+#        define SLINT_ZEPHYR_RENDER_BUFFER_SECTION __attribute__((section("SRAMX")))
+#    else
+#        define SLINT_ZEPHYR_RENDER_BUFFER_SECTION
+#    endif
+static constexpr std::size_t RENDER_BUFFER_WIDTH = 480;
+static constexpr std::size_t RENDER_BUFFER_HEIGHT = 1;
+SLINT_ZEPHYR_RENDER_BUFFER_SECTION alignas(8) static slint::platform::Rgb565Pixel
+        render_buffer[RENDER_BUFFER_WIDTH * RENDER_BUFFER_HEIGHT];
 // GT911 touch X-axis range in native orientation (320 pixels, used for invert-x transform)
 static constexpr int GT911_TOUCH_X_MAX = 319;
 #endif
@@ -279,7 +240,7 @@ std::unique_ptr<ZephyrWindowAdapter> ZephyrWindowAdapter::init_from(const device
     display_capabilities capabilities;
     display_get_capabilities(display, &capabilities);
 
-#ifdef SLINT_ZEPHYR_RENDER_BY_LINE
+#ifdef CONFIG_SHIELD_LCD_PAR_S035
     RepaintBufferType bufferType = RepaintBufferType::NewBuffer;
 #else
     // TODO: Double buffer
@@ -309,8 +270,8 @@ std::unique_ptr<ZephyrWindowAdapter> ZephyrWindowAdapter::init_from(const device
     case PIXEL_FORMAT_ARGB_8888:
         LOG_WRN("Unsupported pixel format: ARGB_8888");
         break;
-    case SLINT_PIXEL_FORMAT_RGB565_SWAPPED:
-        LOG_WRN("Unsupported pixel format: " SLINT_PIXEL_FORMAT_RGB565_SWAPPED_NAME);
+    case SLINT_ZEPHYR_PIXEL_FORMAT_BGR_565:
+        LOG_WRN("Unsupported pixel format: RGB_565X");
         break;
     }
 
@@ -324,76 +285,55 @@ std::unique_ptr<ZephyrWindowAdapter> ZephyrWindowAdapter::init_from(const device
             static_cast<bool>(capabilities.supported_pixel_formats & PIXEL_FORMAT_ARGB_8888));
     LOG_INF("Supports RGB_565: %d",
             static_cast<bool>(capabilities.supported_pixel_formats & PIXEL_FORMAT_RGB_565));
-    LOG_INF("Supports " SLINT_PIXEL_FORMAT_RGB565_SWAPPED_NAME ": %d",
+    LOG_INF("Supports RGB_565X: %d",
             static_cast<bool>(capabilities.supported_pixel_formats
-                              & SLINT_PIXEL_FORMAT_RGB565_SWAPPED));
+                              & SLINT_ZEPHYR_PIXEL_FORMAT_BGR_565));
 
-    // Keep the format the display already uses: its panel may be wired for that byte order.
-    auto pixel_format = capabilities.current_pixel_format;
-    if (!is_supported_pixel_format(pixel_format)) {
+    if (!is_supported_pixel_format(capabilities.current_pixel_format)) {
         if (capabilities.supported_pixel_formats & PIXEL_FORMAT_RGB_565) {
             LOG_INF("Switching to RGB_565");
-            pixel_format = PIXEL_FORMAT_RGB_565;
-        } else if (capabilities.supported_pixel_formats & SLINT_PIXEL_FORMAT_RGB565_SWAPPED) {
-            LOG_INF("Switching to " SLINT_PIXEL_FORMAT_RGB565_SWAPPED_NAME);
-            pixel_format = SLINT_PIXEL_FORMAT_RGB565_SWAPPED;
+            if (const auto result = display_set_pixel_format(display, PIXEL_FORMAT_RGB_565);
+                result != 0) {
+                LOG_ERR("Failed to set pixel format: %d", result);
+            }
         } else {
             LOG_WRN("No supported pixel formats!");
         }
-
-        if (pixel_format != capabilities.current_pixel_format) {
-            if (const auto result = display_set_pixel_format(display, pixel_format); result != 0) {
-                LOG_ERR("Failed to set pixel format: %d", result);
-                pixel_format = capabilities.current_pixel_format;
-            }
-        }
     }
-    LOG_INF("Byte swapping pixel data: %d", needs_byte_swap(pixel_format));
 
-    DisplayRotation rotation;
-    rotation.panel_size =
-            slint::PhysicalSize({ capabilities.x_resolution, capabilities.y_resolution });
-
-    // The PXP turns the frame buffer on its way to the panel. Its Kconfig names the rotation the
-    // panel sees, which is the opposite of the one the frame buffer undergoes.
+    RotationInfo info;
+    info.size = slint::PhysicalSize({ capabilities.x_resolution, capabilities.y_resolution });
     if (IS_ENABLED(CONFIG_MCUX_ELCDIF_PXP_ROTATE_90))
-        rotation.hardware = RenderingRotation::Rotate270;
+        info.rotation = slint::platform::SoftwareRenderer::RenderingRotation::Rotate270;
     else if (IS_ENABLED(CONFIG_MCUX_ELCDIF_PXP_ROTATE_180))
-        rotation.hardware = RenderingRotation::Rotate180;
+        info.rotation = slint::platform::SoftwareRenderer::RenderingRotation::Rotate180;
     else if (IS_ENABLED(CONFIG_MCUX_ELCDIF_PXP_ROTATE_270))
-        rotation.hardware = RenderingRotation::Rotate90;
+        info.rotation = slint::platform::SoftwareRenderer::RenderingRotation::Rotate90;
 
-    // Panels that are mounted sideways are turned by the software renderer instead.
-    rotation.rendering = rotation_from_degrees(SLINT_ZEPHYR_PANEL_ROTATION);
-
-    const auto logicalSize = rotation.logical_size();
-    LOG_INF("User interface size: %u x %u", logicalSize.width, logicalSize.height);
-    return std::make_unique<ZephyrWindowAdapter>(display, bufferType, rotation,
-                                                 needs_byte_swap(pixel_format));
+    const auto rotatedSize = transformed(info.size, info);
+    LOG_INF("Rotated screen size: %u x %u", rotatedSize.width, rotatedSize.height);
+    return std::make_unique<ZephyrWindowAdapter>(display, bufferType, info);
 }
 
 ZephyrWindowAdapter::ZephyrWindowAdapter(const device *display, RepaintBufferType buffer_type,
-                                         const DisplayRotation &rotation, bool needs_byte_swap)
+                                         const RotationInfo &info)
     : m_renderer(buffer_type),
       m_display(display),
-      m_rotation(rotation),
-      m_buffer_size(rotation.buffer_size()),
-      m_needs_byte_swap(needs_byte_swap)
+      m_rotationInfo(info),
+      m_size(transformed(m_rotationInfo.size, m_rotationInfo))
 {
-#ifdef SLINT_ZEPHYR_RENDER_BY_LINE
-    // One line, for parts whose RAM will not hold a whole frame.
-    m_buffer.resize(m_buffer_size.width);
-    m_buffer_descriptor.height = 1;
+#ifdef CONFIG_SHIELD_LCD_PAR_S035
+    m_buffer = render_buffer;
+    m_buffer_descriptor.buf_size = sizeof(render_buffer);
+    m_buffer_descriptor.width = m_size.width;
+    m_buffer_descriptor.height = RENDER_BUFFER_HEIGHT;
 #else
-    m_buffer.resize(m_buffer_size.width * m_buffer_size.height);
-    m_buffer_descriptor.height = m_buffer_size.height;
-#endif
-
+    m_buffer.resize(m_size.width * m_size.height);
     m_buffer_descriptor.buf_size = sizeof(m_buffer[0]) * m_buffer.size();
-    m_buffer_descriptor.width = m_buffer_size.width;
-    m_buffer_descriptor.pitch = m_buffer_size.width;
-
-    m_renderer.set_rendering_rotation(m_rotation.rendering);
+    m_buffer_descriptor.width = m_size.width;
+    m_buffer_descriptor.height = m_size.height;
+#endif
+    m_buffer_descriptor.pitch = m_size.width;
 }
 
 void ZephyrWindowAdapter::request_redraw()
@@ -403,7 +343,7 @@ void ZephyrWindowAdapter::request_redraw()
 
 slint::PhysicalSize ZephyrWindowAdapter::size()
 {
-    return m_rotation.logical_size();
+    return m_size;
 }
 
 slint::platform::AbstractRenderer &ZephyrWindowAdapter::renderer()
@@ -416,53 +356,46 @@ void ZephyrWindowAdapter::maybe_redraw()
     if (!std::exchange(m_needs_redraw, false))
         return;
 
-    auto start = k_uptime_get();
-#ifdef SLINT_ZEPHYR_RENDER_BY_LINE
-    auto region = m_renderer.render_by_line<slint::platform::Rgb565Pixel>(
-            [this](std::size_t line, std::size_t begin, std::size_t end, auto render_line) {
-                std::span<slint::platform::Rgb565Pixel> span(m_buffer.data() + begin, end - begin);
-                render_line(span);
+#ifdef CONFIG_SHIELD_LCD_PAR_S035
+    display_buffer_descriptor line_desc {};
+    line_desc.pitch = m_size.width;
 
-                if constexpr (needs_byte_swap) {
-                    for (auto &pixel : span) {
-                        auto px = reinterpret_cast<uint16_t *>(&pixel);
-                        *px = (*px << 8) | (*px >> 8);
-                    }
-                }
+    m_renderer.render_by_line<slint::platform::Rgb565Pixel>(
+            [this, &line_desc](size_t line_y, size_t first_x, size_t last_x, auto render_fn) {
+                size_t width = last_x - first_x;
+                render_fn(std::span<slint::platform::Rgb565Pixel>(m_buffer, width));
 
-                m_buffer_descriptor.width = span.size();
-                m_buffer_descriptor.pitch = span.size();
-                m_buffer_descriptor.buf_size = sizeof(m_buffer[0]) * span.size();
-                if (const auto ret = display_write(m_display, begin, line, &m_buffer_descriptor,
-                                                   span.data())
-                            != 0) {
-                    LOG_WRN("display_write returned non-zero: %d", ret);
-                }
+                line_desc.width = width;
+                line_desc.height = 1;
+                line_desc.buf_size = width * sizeof(slint::platform::Rgb565Pixel);
+
+                display_write(m_display, first_x, line_y, &line_desc, m_buffer);
             });
-    const auto slintRenderDelta = k_uptime_delta(&start);
-    LOG_DBG("Rendered %d dirty regions line by line", std::ranges::size(region.rectangles()));
 #else
-    auto region = m_renderer.render(m_buffer, m_buffer_size.width);
+    auto start = k_uptime_get();
+    auto region = m_renderer.render(m_buffer, m_size.width);
     const auto slintRenderDelta = k_uptime_delta(&start);
     LOG_DBG("Rendering %d dirty regions:", std::ranges::size(region.rectangles()));
     for (auto [o, s] : region.rectangles()) {
-        if (m_needs_byte_swap) {
-            for (int y = o.y; y < o.y + s.height; y++) {
-                for (int x = o.x; x < o.x + s.width; x++) {
-                    auto px = reinterpret_cast<uint16_t *>(&m_buffer[y * m_buffer_size.width + x]);
-                    *px = (*px << 8) | (*px >> 8);
-                }
+#    ifndef CONFIG_SHIELD_RK055HDMIPI4MA0
+        // Convert to big endian pixel data for Zephyr, unless we are using the RK055HDMIPI4MA0
+        // shield. See is_supported_pixel_format above.
+        for (int y = o.y; y < o.y + s.height; y++) {
+            for (int x = o.x; x < o.x + s.width; x++) {
+                auto px = reinterpret_cast<uint16_t *>(&m_buffer[y * m_size.width + x]);
+                *px = (*px << 8) | (*px >> 8);
             }
-            LOG_DBG("   - converted pixel data for x: %d y: %d w: %d h: %d", o.x, o.y, s.width,
-                    s.height);
         }
+        LOG_DBG("   - converted pixel data for x: %d y: %d w: %d h: %d", o.x, o.y, s.width,
+                s.height);
+#    endif
 
 #    ifndef CONFIG_MCUX_ELCDIF_PXP
         m_buffer_descriptor.width = s.width;
         m_buffer_descriptor.height = s.height;
 
         if (const auto ret = display_write(m_display, o.x, o.y, &m_buffer_descriptor,
-                                           m_buffer.data() + ((o.y * m_buffer_size.width) + o.x))
+                                           m_buffer.data() + ((o.y * m_size.width) + o.x))
                     != 0) {
             LOG_WRN("display_write returned non-zero: %d", ret);
         }
@@ -486,13 +419,9 @@ void ZephyrWindowAdapter::maybe_redraw()
 #endif
 }
 
-slint::LogicalPosition
-ZephyrWindowAdapter::map_touch_position(slint::LogicalPosition position) const
+const RotationInfo &ZephyrWindowAdapter::rotationInfo() const
 {
-    const auto panel = rotated(position, m_rotation.touch_rotation(), m_rotation.panel_size);
-    // The touch controller reports physical pixels, Slint wants logical ones.
-    return slint::LogicalPosition({ panel.x / SLINT_ZEPHYR_SCALE_FACTOR,
-                                    panel.y / SLINT_ZEPHYR_SCALE_FACTOR });
+    return m_rotationInfo;
 }
 
 ZephyrPlatform::ZephyrPlatform(const struct device *display) : m_display(display)
@@ -585,10 +514,7 @@ void ZephyrPlatform::run_event_loop()
         }
 
         if (auto next_timer_update = slint::platform::duration_until_next_timer_update()) {
-            auto wait_time_ms = next_timer_update.value().count();
-#ifdef CONFIG_BOARD_RZA3M_EK
-            wait_time_ms = std::min(wait_time_ms, static_cast<decltype(wait_time_ms)>(10000));
-#endif
+            const auto wait_time_ms = next_timer_update.value().count();
             LOG_DBG("Sleeping for %llims", wait_time_ms);
             k_sem_take(&SLINT_SEM, K_MSEC(wait_time_ms));
         } else {
@@ -614,6 +540,13 @@ void ZephyrPlatform::run_in_event_loop(Task event)
         m_queue.push_back(std::move(event));
     }
     k_sem_give(&SLINT_SEM);
+}
+
+// Transform a physical touch position (after rotation) into logical coordinates
+static slint::LogicalPosition to_logical(slint::LogicalPosition p)
+{
+    return slint::LogicalPosition(
+            { p.x / SLINT_ZEPHYR_SCALE_FACTOR, p.y / SLINT_ZEPHYR_SCALE_FACTOR });
 }
 
 void zephyr_process_input_event(struct input_event *event, void *user_data)
@@ -663,8 +596,8 @@ void zephyr_process_input_event(struct input_event *event, void *user_data)
             button = slint::PointerEventButton::Left;
             slint::invoke_from_event_loop([=, button = button.value()] {
                 __ASSERT(ZEPHYR_WINDOW, "Expected ZephyrWindowAdapter");
-                // Transform the panel position to the logical coordinate
-                const auto slintPos = ZEPHYR_WINDOW->map_touch_position(pos);
+                // Transform the physical screen position to the logical coordinate
+                const auto slintPos = to_logical(transformed(pos, ZEPHYR_WINDOW->rotationInfo()));
                 ZEPHYR_WINDOW->window().dispatch_pointer_move_event(slintPos);
                 ZEPHYR_WINDOW->window().dispatch_pointer_press_event(slintPos, button);
             });
@@ -672,16 +605,16 @@ void zephyr_process_input_event(struct input_event *event, void *user_data)
             LOG_DBG("Move");
             slint::invoke_from_event_loop([=] {
                 __ASSERT(ZEPHYR_WINDOW, "Expected ZephyrWindowAdapter");
-                // Transform the panel position to the logical coordinate
-                const auto slintPos = ZEPHYR_WINDOW->map_touch_position(pos);
+                // Transform the physical screen position to the logical coordinate
+                const auto slintPos = to_logical(transformed(pos, ZEPHYR_WINDOW->rotationInfo()));
                 ZEPHYR_WINDOW->window().dispatch_pointer_move_event(slintPos);
             });
         } else {
             LOG_DBG("Release");
             slint::invoke_from_event_loop([=, button = button.value()] {
                 __ASSERT(ZEPHYR_WINDOW, "Expected ZephyrWindowAdapter");
-                // Transform the panel position to the logical coordinate
-                const auto slintPos = ZEPHYR_WINDOW->map_touch_position(pos);
+                // Transform the physical screen position to the logical coordinate
+                const auto slintPos = to_logical(transformed(pos, ZEPHYR_WINDOW->rotationInfo()));
                 ZEPHYR_WINDOW->window().dispatch_pointer_release_event(slintPos, button);
                 ZEPHYR_WINDOW->window().dispatch_pointer_exit_event();
             });
@@ -690,9 +623,7 @@ void zephyr_process_input_event(struct input_event *event, void *user_data)
     }
 }
 
-#if DT_HAS_CHOSEN(zephyr_touch)
 INPUT_CALLBACK_DEFINE(DEVICE_DT_GET(DT_CHOSEN(zephyr_touch)), zephyr_process_input_event, NULL);
-#endif
 
 void slint_zephyr_init(const struct device *display)
 {
