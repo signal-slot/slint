@@ -1,0 +1,27 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: MIT
+
+# Board-specific knobs for the Slint software renderer.
+#
+# Keeping these in Kconfig rather than in CMakeLists.txt means a new board needs
+# nothing but a boards/<board>.conf file. The Rust target is derived from the
+# CPU that Zephyr already knows about, and the peripherals are discovered from
+# the devicetree, so there is no board list to extend.
+
+config SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN
+	bool "The display driver takes RGB565 in native endian"
+	help
+	  Zephyr's PIXEL_FORMAT_RGB_565 is big endian. Some drivers declare that
+	  format but consume native endian data. Set this to skip the byte swap.
+
+config SLINT_ZEPHYR_SCALE_FACTOR
+	string "Logical pixel to physical pixel ratio"
+	default "1"
+	help
+	  Everything in the .slint file is written in logical pixels. This is how
+	  many physical pixels one of them covers. A 320x240 panel wants 1, and a
+	  bigger panel or a desktop window wants 2 so that the same layout stays
+	  readable. The software renderer bakes glyphs at build time, so this is a
+	  build-time setting rather than a runtime one.
+
+source "Kconfig.zephyr"
