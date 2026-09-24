@@ -423,13 +423,33 @@ void ZephyrWindowAdapter::maybe_redraw()
         }
 
 #    ifndef CONFIG_MCUX_ELCDIF_PXP
-        m_buffer_descriptor.width = s.width;
-        m_buffer_descriptor.height = s.height;
+        if (s.width == m_size.width) {
+            m_buffer_descriptor.width = s.width;
+            m_buffer_descriptor.height = s.height;
 
-        if (const auto ret = display_write(m_display, o.x, o.y, &m_buffer_descriptor,
-                                           m_buffer.data() + ((o.y * m_size.width) + o.x))
-                    != 0) {
-            LOG_WRN("display_write returned non-zero: %d", ret);
+            if (const auto ret = display_write(m_display, o.x, o.y, &m_buffer_descriptor,
+                                               m_buffer.data() + ((o.y * m_size.width) + o.x))
+                        != 0) {
+                LOG_WRN("display_write returned non-zero: %d", ret);
+            }
+        } else {
+            // A rectangle narrower than the screen is not contiguous in the buffer. Send it one
+            // line at a time with pitch == width: some drivers mishandle pitch > width (Zephyr
+            // v4.4's ili9xxx sends a whole pitch per line into a window only width wide, which
+            // wraps and garbles every partial redraw).
+            display_buffer_descriptor line {};
+            line.width = s.width;
+            line.height = 1;
+            line.pitch = s.width;
+            line.buf_size = s.width * sizeof(m_buffer[0]);
+            for (int y = o.y; y < o.y + int(s.height); y++) {
+                if (const auto ret = display_write(m_display, o.x, y, &line,
+                                                   m_buffer.data() + (y * m_size.width) + o.x)
+                            != 0) {
+                    LOG_WRN("display_write returned non-zero: %d", ret);
+                    break;
+                }
+            }
         }
         LOG_DBG("   - rendered x: %d y: %d w: %d h: %d", o.x, o.y, s.width, s.height);
 #    endif
