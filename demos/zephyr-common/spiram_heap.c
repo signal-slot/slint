@@ -27,6 +27,14 @@
 
 #define HDR_SIZE 16
 
+/* sys_heap (under shared_multi_heap) does no locking of its own; k_heap
+ * wraps it in a spinlock. Do the same: Slint allocates on the main thread
+ * while rendering, and the input thread preempts it to queue touch events,
+ * which allocates too. Without the lock the two corrupt the heap, and a
+ * later allocation asserts and halts the system.
+ */
+static struct k_spinlock heap_lock;
+
 struct hdr {
 	size_t size;
 	size_t offset; /* returned pointer minus allocation base */
@@ -40,8 +48,11 @@ static void *alloc_common(size_t align, size_t size)
 	if (align < HDR_SIZE) {
 		align = HDR_SIZE;
 	}
+	k_spinlock_key_t key = k_spin_lock(&heap_lock);
 	uint8_t *base = shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, align,
 							size + align);
+
+	k_spin_unlock(&heap_lock, key);
 	if (base == NULL) {
 		return NULL;
 	}
@@ -62,8 +73,10 @@ void free(void *ptr)
 {
 	if (ptr != NULL) {
 		struct hdr *h = (struct hdr *)((uint8_t *)ptr - HDR_SIZE);
+		k_spinlock_key_t key = k_spin_lock(&heap_lock);
 
 		shared_multi_heap_free((uint8_t *)ptr - h->offset);
+		k_spin_unlock(&heap_lock, key);
 	}
 }
 
