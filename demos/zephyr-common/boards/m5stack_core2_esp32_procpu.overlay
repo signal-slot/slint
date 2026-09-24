@@ -12,3 +12,30 @@
 	/delete-property/ screen-width;
 	/delete-property/ screen-height;
 };
+
+/*
+ * Grove / M-Bus の 5V (BUS_5V) を Core2 自身で作るための設定.
+ *
+ * USB の 5V は AXP192 の ACIN に入り, BUS_5V は別系統である. BUS_5V を駆動
+ * できるのは EXTEN で有効にする昇圧回路だけで, その入力は AXP192 の IPSOUT.
+ * BUS_5V は AXP192 の VBUS 入力にも繋がっているので, VBUS 入力を有効にしたまま
+ * 昇圧を入れると IPSOUT -> 昇圧 -> VBUS -> IPSOUT の帰還ループになり, 本体ごと
+ * 電源が落ちる.
+ *
+ * VBUS 入力を切るには GPIO0 を LDO 出力にして N_VBUSEN を吊り上げる. board の
+ * dts は GPIO0 を open-drain の gpio-hog にしているが, open-drain の high は線を
+ * 離すだけで, N_VBUSEN は外付けのプルダウンで low のままになる. そこで hog を
+ * 外し, 同じ GPIO0 を LDOIO0 regulator として宣言する. regulator_axp192 は
+ * LDOIO0 の enable で GPIO0 を LDO モードに切り替える.
+ */
+&axp192_gpio {
+	/delete-node/ axp192_gpio0;
+};
+
+&axp192_regulator {
+	bus_pwr_en: LDOIO0 {
+		regulator-init-microvolt = <3300000>;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+};

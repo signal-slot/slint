@@ -85,6 +85,9 @@ function(slint_zephyr_app ui)
 
     target_sources(app PRIVATE ${SLINT_ZEPHYR_COMMON}/slint-zephyr.cpp
                    ${SLINT_ZEPHYR_COMMON}/spiram_heap.c ${ARGN})
+    if(CONFIG_BOARD_M5STACK_CORE2)
+        target_sources(app PRIVATE ${SLINT_ZEPHYR_COMMON}/m5stack_core2_bus_power.c)
+    endif()
     target_include_directories(app PRIVATE ${SLINT_ZEPHYR_COMMON})
     target_link_libraries(app PRIVATE Slint::Slint)
     if(CONFIG_SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN)
