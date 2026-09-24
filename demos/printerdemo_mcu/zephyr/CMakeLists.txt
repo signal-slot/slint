@@ -24,19 +24,16 @@ elseif(BOARD STREQUAL "m5stack_core2/esp32/procpu")
     set(Rust_CARGO_TARGET "xtensa-esp32-none-elf")
     set(SLINT_LIBRARY_CARGO_FLAGS "-Zbuild-std=core,alloc")
     set(BOARD_CONF_NAME "m5stack_core2_esp32_procpu")
-    # A full 320x240 RGB565 frame is 150 KB, which does not fit in the
-    # ESP32's remaining internal heap; render line by line instead.
-    set(SLINT_ZEPHYR_RENDER_BY_LINE 1)
 else()
     # See rustc --print target-list for available targets. Match that up with you supported board
     # https://docs.zephyrproject.org/latest/boards
     message(FATAL_ERROR "Unsupported BOARD option specified: ${BOARD}")
 endif()
 
-# This panel takes native endian data, and its 480x320 frame does not fit in RAM.
+# This panel takes native endian data. slint-zephyr.cpp renders it line by line, as its
+# 480x320 frame does not fit in RAM.
 if(SHIELD MATCHES "lcd_par_s035")
     set(SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN 1)
-    set(SLINT_ZEPHYR_RENDER_BY_LINE 1)
 endif()
 
 # Use shared Zephyr configuration from zephyr-common
@@ -86,9 +83,6 @@ endif()
 if(DEFINED SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN)
     target_compile_definitions(app PRIVATE
         SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN=${SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN})
-endif()
-if(DEFINED SLINT_ZEPHYR_RENDER_BY_LINE)
-    target_compile_definitions(app PRIVATE SLINT_ZEPHYR_RENDER_BY_LINE)
 endif()
 
 slint_target_sources(app ../ui/printerdemo.slint)

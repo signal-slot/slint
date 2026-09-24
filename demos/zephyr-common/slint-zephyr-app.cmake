@@ -38,8 +38,6 @@ macro(slint_zephyr_conf)
             list(APPEND DTC_OVERLAY_FILE ${dir}/boards/${BOARD_CONF_NAME}.overlay)
         endif()
     endforeach()
-    # pwm-servo はこのリポジトリ独自の binding なので在り処を教える.
-    list(APPEND DTS_ROOT ${SLINT_ZEPHYR_COMMON})
 endmacro()
 
 # project() の後に呼ぶ. Rust の target を選び, Slint と画面まわりを app に足す.
@@ -93,14 +91,6 @@ function(slint_zephyr_app ui)
     if(CONFIG_SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN)
         target_compile_definitions(app PRIVATE SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN)
     endif()
-    foreach(part Y:%Y M:%m D:%d H:%H MIN:%M S:%S)
-        string(REPLACE ":" ";" part "${part}")
-        list(GET part 0 name)
-        list(GET part 1 fmt)
-        string(TIMESTAMP value "${fmt}")
-        string(REGEX REPLACE "^0+([0-9])" "\\1" value "${value}")
-        target_compile_definitions(app PRIVATE CARPARK_BUILD_${name}=${value})
-    endforeach()
     if(CONFIG_SLINT_ZEPHYR_SCALE_FACTOR)
         set_property(TARGET app PROPERTY SLINT_SCALE_FACTOR ${CONFIG_SLINT_ZEPHYR_SCALE_FACTOR})
         target_compile_definitions(app PRIVATE

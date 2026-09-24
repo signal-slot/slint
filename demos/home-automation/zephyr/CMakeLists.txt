@@ -48,9 +48,6 @@ elseif(BOARD STREQUAL "m5stack_core2/esp32/procpu")
     # 320x240 panel at a third of the scale.
     set(SLINT_HOME_AUTOMATION_UI_DEFAULT "main-480x320.slint")
     set(SLINT_ZEPHYR_SCALE_FACTOR_DEFAULT "0.333333")
-    # A full 320x240 RGB565 frame is 150 KB, which does not fit in the
-    # ESP32's remaining internal heap; render line by line instead.
-    set(SLINT_ZEPHYR_RENDER_BY_LINE 1)
 else()
     # See rustc --print target-list for available targets. Match that up with you supported board
     # https://docs.zephyrproject.org/latest/boards
@@ -62,10 +59,10 @@ if(SHIELD MATCHES "rk055hdmipi4ma0")
     set(SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN 1)
 endif()
 
-# This panel takes native endian data, and its 480x320 frame does not fit in RAM.
+# This panel takes native endian data. slint-zephyr.cpp renders it line by line, as its
+# 480x320 frame does not fit in RAM.
 if(SHIELD MATCHES "lcd_par_s035")
     set(SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN 1)
-    set(SLINT_ZEPHYR_RENDER_BY_LINE 1)
 endif()
 set(SLINT_HOME_AUTOMATION_UI "${SLINT_HOME_AUTOMATION_UI_DEFAULT}" CACHE STRING
     "Slint UI entry point to build (relative to ../ui)")
@@ -118,9 +115,6 @@ endif()
 if(DEFINED SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN)
     target_compile_definitions(app PRIVATE
         SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN=${SLINT_ZEPHYR_RGB565_NATIVE_ENDIAN})
-endif()
-if(DEFINED SLINT_ZEPHYR_RENDER_BY_LINE)
-    target_compile_definitions(app PRIVATE SLINT_ZEPHYR_RENDER_BY_LINE)
 endif()
 
 slint_target_sources(app ../ui/${SLINT_HOME_AUTOMATION_UI})
